@@ -8,6 +8,9 @@ public class BotConfig
 {
     public string BotToken { get; set; } = "";
     public string CryptoPayToken { get; set; } = "";
+    public string CryptoPayWebhookUrl { get; set; } = "";
+    public string CryptoPayWebhookListenUrl { get; set; } = "http://127.0.0.1:8081";
+    public bool AllowTestPayments { get; set; }
     public string OpenRouterKey { get; set; } = "";
     public string BotUsername { get; set; } = "";
     public long[] AdminIds { get; set; } = Array.Empty<long>();
@@ -17,42 +20,98 @@ public class BotConfig
 
     public static BotConfig FromEnvironment()
     {
-        // Загружаем .env файл вручную (без DotNetEnv)
         LoadEnvFile();
 
-        var adminIds = (Environment.GetEnvironmentVariable("ADMIN_IDS") ?? "5309079204")
-            .Split(',', StringSplitOptions.RemoveEmptyEntries)
-            .Select(id => long.Parse(id.Trim()))
+        var adminIdsValue = Environment.GetEnvironmentVariable("ADMIN_IDS");
+        if (string.IsNullOrWhiteSpace(adminIdsValue))
+            throw new InvalidOperationException("ADMIN_IDS must contain at least one Telegram user ID.");
+
+        var adminIds = adminIdsValue
+            .Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+            .Select(ParseAdminId)
+            .Distinct()
             .ToArray();
+        if (adminIds.Length == 0)
+            throw new InvalidOperationException("ADMIN_IDS must contain at least one Telegram user ID.");
 
         var botToken = Environment.GetEnvironmentVariable("BOT_TOKEN");
-        if (string.IsNullOrEmpty(botToken))
+        if (string.IsNullOrWhiteSpace(botToken))
         {
-            Console.WriteLine("\n❌ ОШИБКА: BOT_TOKEN не найден!");
-            Console.WriteLine("\nЧтобы исправить:");
-            Console.WriteLine("1. Создайте файл .env в папке проекта:");
-            Console.WriteLine("   nano .env");
-            Console.WriteLine("\n2. И добавьте туда:");
-            Console.WriteLine("   BOT_TOKEN=8840484865:AAEr5f814m0ZJIGHNQaOW85FYJiZsqUsGXU");
-            Console.WriteLine("   ADMIN_IDS=5309079204");
-            Console.WriteLine("\n3. Или экспортируйте переменную:");
-            Console.WriteLine("   export BOT_TOKEN=8840484865:AAEr5f814m0ZJIGHNQaOW85FYJiZsqUsGXU");
-            Console.WriteLine("   dotnet run\n");
-            throw new InvalidOperationException("BOT_TOKEN not set in environment or .env file");
+            throw new InvalidOperationException(
+                "BOT_TOKEN is required. Set it in the environment or local .env file."
+            );
+        }
+
+        var cryptoPayToken = Environment.GetEnvironmentVariable("CRYPTOPAY_TOKEN") ?? "";
+        var cryptoPayWebhookUrl = Environment.GetEnvironmentVariable("CRYPTOPAY_WEBHOOK_URL") ?? "";
+        var cryptoPayWebhookListenUrl =
+            Environment.GetEnvironmentVariable("CRYPTOPAY_WEBHOOK_LISTEN_URL")
+            ?? "http://127.0.0.1:8081";
+
+        if (!string.IsNullOrWhiteSpace(cryptoPayToken))
+        {
+            if (
+                !Uri.TryCreate(cryptoPayWebhookUrl, UriKind.Absolute, out var webhookUri)
+                || webhookUri.Scheme != Uri.UriSchemeHttps
+                || !string.IsNullOrEmpty(webhookUri.UserInfo)
+                || !string.IsNullOrEmpty(webhookUri.Query)
+                || !string.IsNullOrEmpty(webhookUri.Fragment)
+                || webhookUri.AbsolutePath != "/webhooks/cryptopay"
+            )
+                throw new InvalidOperationException(
+                    "CRYPTOPAY_WEBHOOK_URL must be an HTTPS URL ending in /webhooks/cryptopay."
+                );
+
+            if (
+                !Uri.TryCreate(cryptoPayWebhookListenUrl, UriKind.Absolute, out var listenUri)
+                || listenUri.Scheme != Uri.UriSchemeHttp
+                || !string.IsNullOrEmpty(listenUri.UserInfo)
+                || !string.IsNullOrEmpty(listenUri.Query)
+                || !string.IsNullOrEmpty(listenUri.Fragment)
+                || listenUri.AbsolutePath != "/"
+                || !IsLoopbackHost(listenUri.Host)
+            )
+                throw new InvalidOperationException(
+                    "CRYPTOPAY_WEBHOOK_LISTEN_URL must be an HTTP loopback URL."
+                );
         }
 
         return new BotConfig
         {
             BotToken = botToken,
-            CryptoPayToken = Environment.GetEnvironmentVariable("CRYPTOPAY_TOKEN") ?? "",
+            CryptoPayToken = cryptoPayToken,
+            CryptoPayWebhookUrl = cryptoPayWebhookUrl,
+            CryptoPayWebhookListenUrl = cryptoPayWebhookListenUrl,
+            AllowTestPayments = string.Equals(
+                Environment.GetEnvironmentVariable("ALLOW_TEST_PAYMENTS"),
+                "true",
+                StringComparison.OrdinalIgnoreCase
+            ),
             OpenRouterKey = Environment.GetEnvironmentVariable("OPENROUTER_API_KEY") ?? "",
             BotUsername = Environment.GetEnvironmentVariable("BOT_USERNAME") ?? "bot",
             AdminIds = adminIds,
             SupportUsername = Environment.GetEnvironmentVariable("SUPPORT_USERNAME") ?? "CherrysXD",
             TermsUrl = Environment.GetEnvironmentVariable("TERMS_URL") ?? "https://telegra.ph",
-            DataPath = Environment.GetEnvironmentVariable("DATA_PATH") ?? "data/bot_data.json",
+            DataPath = Path.GetFullPath(
+                Environment.GetEnvironmentVariable("DATA_PATH") ?? "data/bot_data.json"
+            ),
         };
     }
+
+    private static long ParseAdminId(string value)
+    {
+        if (!long.TryParse(value, out var adminId) || adminId <= 0)
+            throw new InvalidOperationException("ADMIN_IDS contains an invalid Telegram user ID.");
+
+        return adminId;
+    }
+
+    private static bool IsLoopbackHost(string host) =>
+        string.Equals(host, "localhost", StringComparison.OrdinalIgnoreCase)
+        || (
+            System.Net.IPAddress.TryParse(host, out var address)
+            && System.Net.IPAddress.IsLoopback(address)
+        );
 
     private static void LoadEnvFile()
     {
@@ -60,14 +119,14 @@ public class BotConfig
 
         if (!string.IsNullOrEmpty(envPath) && System.IO.File.Exists(envPath))
         {
-            Console.WriteLine($"✓ Загружаем конфигурацию из {envPath}");
-
             foreach (var line in System.IO.File.ReadAllLines(envPath))
             {
                 var trimmedLine = line.Trim();
 
-                // Пропускаем пустые строки и комментарии
-                if (string.IsNullOrEmpty(trimmedLine) || trimmedLine.StartsWith("#"))
+                if (
+                    string.IsNullOrEmpty(trimmedLine)
+                    || trimmedLine.StartsWith("#", StringComparison.Ordinal)
+                )
                     continue;
 
                 var separatorIndex = trimmedLine.IndexOf('=');
@@ -80,14 +139,10 @@ public class BotConfig
                     if (value.StartsWith("\"") && value.EndsWith("\""))
                         value = value.Substring(1, value.Length - 2);
 
-                    Environment.SetEnvironmentVariable(key, value);
+                    if (Environment.GetEnvironmentVariable(key) is null)
+                        Environment.SetEnvironmentVariable(key, value);
                 }
             }
-        }
-        else
-        {
-            Console.WriteLine("⚠️ .env файл не найден, используем системные переменные");
-            Console.WriteLine($"   Искали в: {Environment.CurrentDirectory}");
         }
     }
 
@@ -96,10 +151,8 @@ public class BotConfig
         // Ищем .env в разных местах
         string[] possiblePaths = new string[]
         {
-            Path.Combine(Environment.CurrentDirectory, ".env"),
             Path.Combine(AppContext.BaseDirectory, ".env"),
-            Path.Combine(Directory.GetCurrentDirectory(), ".env"),
-            ".env",
+            Path.Combine(Environment.CurrentDirectory, ".env"),
         };
 
         foreach (var path in possiblePaths)

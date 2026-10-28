@@ -4,7 +4,6 @@ namespace KeyBot.Services;
 public class ReferralService : IReferralService
 {
     private readonly Database _db;
-    private readonly object _lock = new();
 
     private const int BonusDaysPerReferral = 7;
     private const int ReferreeBonusDays = 3;
@@ -34,17 +33,10 @@ public class ReferralService : IReferralService
         if (referrerId == refereeId)
             return Task.FromResult(false);
 
-        if (
-            _db.Users.TryGetValue(refereeId.ToString(), out var userData)
-            && userData.ReferredBy != null
-        )
-            return Task.FromResult(false);
-
-        lock (_lock)
+        lock (_db.SyncRoot)
         {
-            // Double-check after lock
             if (_db.Users.TryGetValue(refereeId.ToString(), out var u) && u.ReferredBy != null)
-                return Task.FromResult(true);
+                return Task.FromResult(false);
 
             if (_db.Users.TryGetValue(refereeId.ToString(), out var user))
                 user.ReferredBy = referrerId.ToString();
@@ -71,14 +63,14 @@ public class ReferralService : IReferralService
         if (tariffDays < MinTariffDaysForBonus)
             return Task.CompletedTask;
 
-        if (
-            !_db.Users.TryGetValue(refereeId.ToString(), out var userData)
-            || userData.ReferredBy == null
-        )
-            return Task.CompletedTask;
-
-        lock (_lock)
+        lock (_db.SyncRoot)
         {
+            if (
+                !_db.Users.TryGetValue(refereeId.ToString(), out var userData)
+                || userData.ReferredBy == null
+            )
+                return Task.CompletedTask;
+
             if (_db.Referrals.TryGetValue(userData.ReferredBy, out var refs))
             {
                 var entry = refs.FirstOrDefault(r => r.RefereeId == refereeId);
@@ -117,27 +109,33 @@ public class ReferralService : IReferralService
     public Task<int> ActivateBonusDaysAsync(long userId)
     {
         var key = userId.ToString();
-        return Task.FromResult(
-            _db.ReferralBalance.TryGetValue(key, out int days) && days > 0
-                ? _db.ReferralBalance[key] = 0
-                : 0
-        );
+        lock (_db.SyncRoot)
+        {
+            return Task.FromResult(
+                _db.ReferralBalance.TryGetValue(key, out int days) && days > 0
+                    ? _db.ReferralBalance[key] = 0
+                    : 0
+            );
+        }
     }
 
     public Task<ReferralStats> GetStatsAsync(long userId)
     {
         var key = userId.ToString();
-        var r = _db.Referrals.TryGetValue(key, out var list) ? list : [];
-        int pending = 0,
-            earned = 0;
-        foreach (var x in r)
+        lock (_db.SyncRoot)
         {
-            pending += x.BonusDaysPending;
-            earned += x.BonusDaysAwarded;
+            var r = _db.Referrals.TryGetValue(key, out var list) ? list : [];
+            int pending = 0,
+                earned = 0;
+            foreach (var x in r)
+            {
+                pending += x.BonusDaysPending;
+                earned += x.BonusDaysAwarded;
+            }
+            _db.ReferralBalance.TryGetValue(key, out int balance);
+            return Task.FromResult(
+                new ReferralStats(r.Count, r.Count(x => x.HasPurchased), balance, pending, earned)
+            );
         }
-        _db.ReferralBalance.TryGetValue(key, out int bal);
-        return Task.FromResult(
-            new ReferralStats(r.Count, r.Count(x => x.HasPurchased), bal, pending, earned)
-        );
     }
 }

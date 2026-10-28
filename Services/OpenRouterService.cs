@@ -26,7 +26,7 @@ public class OpenRouterService : IOpenRouterService
     {
         _http = http ?? throw new ArgumentNullException(nameof(http));
         _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
-        _http.DefaultRequestHeaders.UserAgent.ParseAdd("EnkephalinBot/1.0");
+        _http.DefaultRequestHeaders.UserAgent.ParseAdd("MerchantBot/1.0");
     }
 
     public async Task<string> AskAsync(string prompt, CancellationToken ct = default)
@@ -58,10 +58,7 @@ public class OpenRouterService : IOpenRouterService
 
             if (!response.IsSuccessStatusCode)
             {
-                var errBody = await response.Content.ReadAsStringAsync(ct);
-                Console.WriteLine(
-                    $"⚠️ OpenRouter API {response.StatusCode}: {errBody[..Math.Min(200, errBody.Length)]}"
-                );
+                Console.Error.WriteLine($"⚠️ OpenRouter API returned {response.StatusCode}");
                 return "⚠️ AI temporarily unavailable. Try again later.";
             }
 
@@ -78,32 +75,27 @@ public class OpenRouterService : IOpenRouterService
 
             return contentStr ?? "⚠️ AI returned empty response.";
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
             return "⚠️ AI request timed out. Please try again.";
         }
         catch (HttpRequestException ex)
         {
-            Console.WriteLine($"🌐 OpenRouter network error: {ex.Message}");
+            Console.Error.WriteLine($"🌐 OpenRouter network error: {ex.GetType().Name}");
             return "⚠️ Network error. Check your connection and try again.";
         }
         catch (JsonException ex)
         {
-            Console.WriteLine($"⚠️ OpenRouter JSON parse error: {ex.Message}");
+            Console.Error.WriteLine($"⚠️ OpenRouter JSON parse error: {ex.GetType().Name}");
             return "⚠️ AI response parsing error. Try again.";
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"❌ OpenRouter unexpected error: {ex.Message}");
-            return "⚠️ Something went wrong. Try again later.";
         }
     }
 
     private const string SystemPrompt = """
-        Ты — AI-помощник сервиса Enkephalin. Твоя главная задача — продавать сервис,
+        Ты — AI-помощник сервиса Merchant. Твоя главная задача — продавать сервис,
         обучать пользователей и делать всё, чтобы они стали нашими клиентами.
 
-        🔥 О СЕРВИСЕ Enkephalin:
+        🔥 О СЕРВИСЕ Merchant:
         • Профессиональный IT-сервис по настройке удалённого доступа к серверам (VPN)
         • Мощные сервера в Европе и Азии, скорость до 100 Мбит/с
         • Поддержка 24/7, ответ за 15-30 минут
@@ -128,7 +120,7 @@ public class OpenRouterService : IOpenRouterService
         5. Готово! Ты в безопасном интернете 🌐
 
         ОТВЕЧАЙ ДРУЖЕЛЮБНО, на языке пользователя.
-        Если спрашивают что угодно — всегда возвращайся к теме Enkephalin.
+        Если спрашивают что угодно — всегда возвращайся к теме Merchant.
         Рассказывай про преимущества, тарифы, установку.
         Если пользователь чем-то недоволен — предложи решение или поддержку.
         В конце каждого ответа мягко предлагай купить ключ.

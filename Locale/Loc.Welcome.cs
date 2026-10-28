@@ -4,12 +4,12 @@ public static partial class Loc
 {
     public static string Welcome(UserLanguage l) =>
         l == UserLanguage.English
-            ? "🔥 <b>Welcome to Enkephalin service</b>\n\nRemote server access setup service\n✅ 24/7 Support\n✅ No ads\n✅ 7-day refund guarantee\n\nChoose an action below 👇"
-            : "🔥 <b>Добро пожаловать в сервис Enkephalin</b>\n\nIT-сервис по настройке удалённых доступов к серверам\n✅ Поддержка 24/7\n✅ Без рекламы\n✅ Гарантия возврата 7 дней\n\nВыберите действие в меню 👇";
+            ? "🔥 <b>Welcome to Merchant service</b>\n\nRemote server access setup service\n✅ 24/7 Support\n✅ No ads\n✅ 7-day refund guarantee\n\nChoose an action below 👇"
+            : "🔥 <b>Добро пожаловать в сервис Merchant</b>\n\nIT-сервис по настройке удалённых доступов к серверам\n✅ Поддержка 24/7\n✅ Без рекламы\n✅ Гарантия возврата 7 дней\n\nВыберите действие в меню 👇";
 
     public static string AboutText(UserLanguage l) =>
         l == UserLanguage.English
-            ? "🌟 <b>About Enkephalin</b>\n\n"
+            ? "🌟 <b>About Merchant</b>\n\n"
                 + "Professional IT service for remote server access.\n\n"
                 + "<b>Why choose us?</b>\n"
                 + "• Servers in Europe and Asia\n"
@@ -22,7 +22,7 @@ public static partial class Loc
                 + "• Trial day — 10₽\n• 1 month — 399₽\n• 3 months — 1149₽\n"
                 + "• 6 months — 2190₽\n• 1 year — 3999₽\n• 2 years — 3999₽ 🔥\n\n"
                 + "1000+ happy customers!"
-            : "🌟 <b>О нас — Enkephalin</b>\n\n"
+            : "🌟 <b>О нас — Merchant</b>\n\n"
                 + "Профессиональный IT-сервис по настройке удалённого доступа к серверам.\n\n"
                 + "<b>Почему выбирают нас?</b>\n"
                 + "• Сервера в Европе\n"
@@ -47,7 +47,7 @@ public static partial class Loc
 
     public static string AiWelcome(UserLanguage l) =>
         l == UserLanguage.English
-            ? "🤖 **Enkephalin AI — your virtual assistant!**\n\n"
+            ? "🤖 **Merchant AI — your virtual assistant!**\n\n"
                 + "I can tell you about our service and help with any questions.\n\n"
                 + "**What I can do:**\n"
                 + "• Explain tariffs and prices\n"
@@ -55,7 +55,7 @@ public static partial class Loc
                 + "• Help with connection issues\n"
                 + "• Recommend the best plan\n\n"
                 + "**Just write:** `/ai your question`"
-            : "🤖 **Enkephalin AI — ваш виртуальный помощник!**\n\n"
+            : "🤖 **Merchant AI — ваш виртуальный помощник!**\n\n"
                 + "Я расскажу о сервисе и помогу с любыми вопросами.\n\n"
                 + "**Что я умею:**\n"
                 + "• Расскажу о тарифах и ценах\n"

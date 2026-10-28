@@ -1,10 +1,14 @@
 using System.Collections.Concurrent;
+using System.Text.Json.Serialization;
 
 namespace KeyBot
 {
     /// <summary>Хранилище данных в памяти. Все коллекции thread-safe.</summary>
     public class Database
     {
+        [JsonIgnore]
+        public object SyncRoot { get; } = new();
+
         public ConcurrentDictionary<string, UserData> Users { get; set; } = new();
         public ConcurrentDictionary<string, TransactionData> Transactions { get; set; } = new();
         public ConcurrentDictionary<string, KeyData> Keys { get; set; } = new();

@@ -14,7 +14,8 @@ public class MessageHandler
     private readonly IUIService _uiService;
     private readonly long[] _adminIds;
     private readonly ConcurrentDictionary<long, bool> _supportWaitState;
-    private readonly ConcurrentDictionary<int, long> _supportMessageMap = new();
+    private readonly ConcurrentDictionary<(long ChatId, int MessageId), long> _supportMessageMap =
+        new();
 
     public MessageHandler(
         ITelegramBotClient bot,
@@ -73,7 +74,14 @@ public class MessageHandler
                         cancellationToken: ct
                     );
                 }
-                catch { }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"⚠️ New-user notification failed: {ex.GetType().Name}");
+                }
             }
         }
     }
@@ -173,11 +181,17 @@ public class MessageHandler
                     parseMode: Telegram.Bot.Types.Enums.ParseMode.Html,
                     cancellationToken: ct
                 );
-                _supportMessageMap[sent.MessageId] = message.From.Id;
+                _supportMessageMap[(sent.Chat.Id, sent.MessageId)] = message.From.Id;
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"⚠️ Support forward failed to admin {adminId}: {ex.Message}");
+                Console.Error.WriteLine(
+                    $"⚠️ Support forwarding failed: {ex.GetType().Name}"
+                );
             }
         }
 
@@ -196,7 +210,10 @@ public class MessageHandler
         if (message.ReplyToMessage == null)
             return false;
         if (
-            !_supportMessageMap.TryGetValue(message.ReplyToMessage.MessageId, out long targetUserId)
+            !_supportMessageMap.TryGetValue(
+                (message.ReplyToMessage.Chat.Id, message.ReplyToMessage.MessageId),
+                out long targetUserId
+            )
         )
             return false;
 
@@ -215,13 +232,18 @@ public class MessageHandler
                 cancellationToken: ct
             );
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
         catch (Exception ex)
         {
             await _bot.SendMessage(
                 message.Chat.Id,
-                $"❌ Не удалось отправить: {ex.Message}",
+                "❌ Не удалось отправить ответ пользователю.",
                 cancellationToken: ct
             );
+            Console.Error.WriteLine($"⚠️ Support reply failed: {ex.GetType().Name}");
         }
         return true;
     }
@@ -241,8 +263,9 @@ public class MessageHandler
                 await _bot.DeleteMessage(message.Chat.Id, msgId, ct);
                 deleted++;
             }
-            catch
-            { /* старые сообщения могут быть уже удалены */
+            catch (Telegram.Bot.Exceptions.ApiRequestException)
+            {
+                // Older messages may already have been deleted or be outside Telegram's limits.
             }
         }
         var lang = await _userService.GetLanguageAsync(message.From.Id);
@@ -251,10 +274,7 @@ public class MessageHandler
             Loc.ClearedMessages(lang, deleted),
             cancellationToken: ct
         );
-        _ = Task.Delay(3000, ct)
-            .ContinueWith(
-                _ => _bot.DeleteMessage(message.Chat.Id, confirm.MessageId),
-                TaskContinuationOptions.OnlyOnRanToCompletion
-            );
+        await Task.Delay(TimeSpan.FromSeconds(3), ct);
+        await _bot.DeleteMessage(message.Chat.Id, confirm.MessageId, ct);
     }
 }

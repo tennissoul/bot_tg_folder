@@ -40,19 +40,50 @@ public partial class AdminHandler
         var lang = await GetLang(message.From.Id);
         var action = _adminAction.GetValueOrDefault(message.From.Id, "");
 
+        if (action == "grant" && step == 2)
+        {
+            if (
+                !int.TryParse(message.Text.Trim(), out var days)
+                || days is <= 0 or > 3650
+                || !_adminTarget.TryGetValue(message.From.Id, out var grantTargetUserId)
+            )
+            {
+                await _bot.SendMessage(
+                    message.Chat.Id,
+                    "❌ "
+                        + (
+                            lang == UserLanguage.English
+                                ? "Invalid subscription duration. Enter 1–3650 days:"
+                                : "Неверный срок подписки. Введите от 1 до 3650 дней:"
+                        ),
+                    cancellationToken: ct
+                );
+                return true;
+            }
+
+            ClearAdminState(message.From.Id);
+            await ExecuteGrantAsync(
+                message.From.Id,
+                message.Chat.Id,
+                grantTargetUserId,
+                days,
+                lang,
+                ct
+            );
+            return true;
+        }
+
         if (!long.TryParse(message.Text.Trim(), out var targetUserId) || targetUserId <= 0)
         {
             await _bot.SendMessage(message.Chat.Id, ErrorText(lang), cancellationToken: ct);
             return true;
         }
 
-        ClearAdminState(message.From.Id);
-
         switch (action)
         {
             case "grant" when step == 1:
-                SetAdminState(message.From.Id, "grant", 2);
                 _adminTarget[message.From.Id] = targetUserId;
+                SetAdminState(message.From.Id, "grant", 2);
                 await _bot.SendMessage(
                     message.Chat.Id,
                     Loc.GrantPromptDays(lang),
@@ -60,33 +91,8 @@ public partial class AdminHandler
                 );
                 return true;
 
-            case "grant" when step == 2:
-                if (!int.TryParse(message.Text.Trim(), out var days) || days <= 0)
-                {
-                    await _bot.SendMessage(
-                        message.Chat.Id,
-                        "❌ "
-                            + (
-                                lang == UserLanguage.English
-                                    ? "Invalid days. Try again:"
-                                    : "Неверное количество дней. Попробуйте ещё раз:"
-                            ),
-                        cancellationToken: ct
-                    );
-                    return true;
-                }
-                await ExecuteGrantAsync(
-                    message.From.Id,
-                    message.Chat.Id,
-                    _adminTarget.GetValueOrDefault(message.From.Id),
-                    days,
-                    lang,
-                    ct
-                );
-                ClearAdminState(message.From.Id);
-                return true;
-
             case "ban":
+                ClearAdminState(message.From.Id);
                 await _userService.BanUserAsync(targetUserId);
                 await _bot.SendMessage(
                     message.Chat.Id,
@@ -97,6 +103,7 @@ public partial class AdminHandler
                 return true;
 
             case "unban":
+                ClearAdminState(message.From.Id);
                 await _userService.UnbanUserAsync(targetUserId);
                 await _bot.SendMessage(
                     message.Chat.Id,
@@ -107,9 +114,11 @@ public partial class AdminHandler
                 return true;
 
             case "removesub":
+                ClearAdminState(message.From.Id);
                 await HandleRemoveSubMessageAsync(message, targetUserId, ct);
                 return true;
         }
+        ClearAdminState(message.From.Id);
         return false;
     }
 }

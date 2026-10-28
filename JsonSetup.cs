@@ -12,14 +12,12 @@ public partial class BotJsonContext : JsonSerializerContext { }
 
 public static class JsonSetup
 {
-    public static JsonSerializerOptions GetOptions()
+    private static readonly JsonSerializerOptions Options = new()
     {
-        var options = new JsonSerializerOptions
-        {
-            WriteIndented = true,
-            PropertyNameCaseInsensitive = true,
-            TypeInfoResolver = BotJsonContext.Default,
-        };
-        return options;
-    }
+        WriteIndented = true,
+        PropertyNameCaseInsensitive = true,
+        TypeInfoResolver = BotJsonContext.Default,
+    };
+
+    public static JsonSerializerOptions GetOptions() => Options;
 }

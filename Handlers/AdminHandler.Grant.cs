@@ -17,10 +17,11 @@ public partial class AdminHandler
         }
         var parts = (message.Text ?? "").Split(' ', StringSplitOptions.RemoveEmptyEntries);
         if (
-            parts.Length < 3
+            parts.Length != 3
             || !long.TryParse(parts[1], out var targetUserId)
+            || targetUserId <= 0
             || !int.TryParse(parts[2], out var days)
-            || days <= 0
+            || days is <= 0 or > 3650
         )
         {
             await _bot.SendMessage(
@@ -60,11 +61,16 @@ public partial class AdminHandler
         CancellationToken ct
     )
     {
-        if (targetUserId <= 0)
+        if (targetUserId <= 0 || days is <= 0 or > 3650)
         {
-            await _bot.SendMessage(chatId, "❌ Error: target user lost", cancellationToken: ct);
+            await _bot.SendMessage(
+                chatId,
+                Loc.GrantInvalidFormat(lang),
+                cancellationToken: ct
+            );
             return;
         }
+
         if (await _userService.GetUserAsync(targetUserId) == null)
             await _userService.AddUserAsync(targetUserId, $"user_{targetUserId}");
 
@@ -94,6 +100,13 @@ public partial class AdminHandler
                 cancellationToken: ct
             );
         }
-        catch { }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"⚠️ Grant notification failed: {ex.GetType().Name}");
+        }
     }
 }

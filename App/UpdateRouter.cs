@@ -1,9 +1,9 @@
-using System.Net.Http;
 using KeyBot.Handlers;
 using KeyBot.Services;
 using Telegram.Bot;
 using Telegram.Bot.Exceptions;
 using Telegram.Bot.Types;
+using KeyBot.Utils;
 
 namespace KeyBot.App;
 
@@ -18,6 +18,7 @@ internal class UpdateRouter
     private readonly ConcurrentDictionary<long, bool> _supportWaitState;
     private readonly AdminHandler _adminHandler;
     private readonly ReferralHandler _referralHandler;
+    private readonly UpdateRateLimiter _rateLimiter;
 
     private readonly Dictionary<string, Func<Message, CancellationToken, Task>> _messageHandlers;
     private readonly Dictionary<
@@ -37,7 +38,8 @@ internal class UpdateRouter
         Dictionary<string, Func<CallbackQuery, CancellationToken, Task>> callbackHandlers,
         Func<CallbackQuery, CancellationToken, Task> tariffHandler,
         ReferralHandler referralHandler,
-        AdminHandler adminHandler
+        AdminHandler adminHandler,
+        UpdateRateLimiter rateLimiter
     )
     {
         _bot = bot;
@@ -51,6 +53,7 @@ internal class UpdateRouter
         _tariffHandler = tariffHandler;
         _referralHandler = referralHandler;
         _adminHandler = adminHandler;
+        _rateLimiter = rateLimiter;
     }
 
     // ── Точка входа (v22 OnMessage / OnUpdate) ───────────────────────────────
@@ -65,35 +68,19 @@ internal class UpdateRouter
         return Task.CompletedTask;
     }
 
-    public Task HandleErrorAsync(ITelegramBotClient _, Exception exception, CancellationToken ct)
-    {
-        if (exception is OperationCanceledException)
-            return Task.CompletedTask;
-
-        if (exception is ApiRequestException { Parameters.RetryAfter: not null } apiEx)
-        {
-            Console.WriteLine($"⏳ Flood wait {apiEx.Parameters.RetryAfter}s");
-            return Task.CompletedTask;
-        }
-
-        if (exception is HttpRequestException httpEx)
-        {
-            Console.WriteLine($"🌐 Нет связи с Telegram: {httpEx.Message}");
-            return Task.CompletedTask;
-        }
-
-        Console.WriteLine($"⚠️ Ошибка API [{exception.GetType().Name}]: {exception.Message}");
-        return Task.CompletedTask;
-    }
-
     // ── Сообщения ────────────────────────────────────────────────────────────
 
     private async Task HandleMessageAsync(Message message, CancellationToken ct)
     {
         if (message.From == null)
             return;
+        if (message.Chat.Type != ChatType.Private)
+            return;
 
         var userId = message.From.Id;
+        if (!_rateLimiter.TryAcquire(userId))
+            return;
+
         var text = message.Text;
 
         // 1. Ответ админа в поддержку
@@ -108,7 +95,7 @@ internal class UpdateRouter
         }
 
         // 3. /start с реферальным кодом
-        if (text.StartsWith(Commands.Start))
+        if (IsCommand(text, Commands.Start))
         {
             await HandleStartCommandAsync(message, userId, text, ct);
             return;
@@ -135,9 +122,13 @@ internal class UpdateRouter
             {
                 await _messageHandler.HandleSupportMessageAsync(message, _adminIds, ct);
             }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
             catch (Exception ex)
             {
-                LogError($"Support msg from {userId}", ex);
+                LogError("Support message handler", ex);
             }
     }
 
@@ -151,17 +142,24 @@ internal class UpdateRouter
         var parts = text.Split(' ', 2);
         string? refCode = parts.Length > 1 ? parts[1].Trim() : null;
 
-        if (!string.IsNullOrEmpty(refCode))
+        await _messageHandler.HandleStartAsync(message, ct, refCode);
+
+        if (
+            !string.IsNullOrEmpty(refCode)
+            && !await _userService.IsUserBannedAsync(userId)
+        )
             try
             {
                 await _referralHandler.TryRegisterReferralAsync(userId, refCode, ct);
             }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
             catch (Exception ex)
             {
-                LogError($"Referral register for {userId}", ex);
+                LogError("Referral registration", ex);
             }
-
-        await _messageHandler.HandleStartAsync(message, ct, refCode);
     }
 
     private async Task<bool> TryHandleAdminStateSafeAsync(Message message, CancellationToken ct)
@@ -170,9 +168,13 @@ internal class UpdateRouter
         {
             return await _adminHandler.TryHandleAdminStateAsync(message, ct);
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
         catch (Exception ex)
         {
-            LogError($"Admin state for {message.From?.Id}", ex);
+            LogError("Admin state handler", ex);
             return false;
         }
     }
@@ -186,15 +188,19 @@ internal class UpdateRouter
     {
         foreach (var (cmd, handler) in _messageHandlers)
         {
-            if (!text.StartsWith(cmd))
+            if (!IsCommand(text, cmd))
                 continue;
             try
             {
                 await handler(message, ct);
             }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
             catch (Exception ex)
             {
-                LogError($"Cmd '{cmd}' from {userId}", ex);
+                LogError($"Command handler '{cmd}'", ex);
             }
             return true;
         }
@@ -218,9 +224,13 @@ internal class UpdateRouter
                 cancellationToken: ct
             );
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
         catch (Exception ex)
         {
-            LogError($"Fallback handler for {userId}", ex);
+            LogError("Fallback handler", ex);
         }
     }
 
@@ -228,15 +238,27 @@ internal class UpdateRouter
 
     private async Task HandleCallbackAsync(CallbackQuery callback, CancellationToken ct)
     {
-        if (callback.From == null || callback.Data == null)
+        if (
+            callback.From == null
+            || callback.Data == null
+            || callback.Message?.Chat.Type != ChatType.Private
+        )
+            return;
+
+        if (!_rateLimiter.TryAcquire(callback.From.Id))
             return;
 
         try
         {
             await _bot.AnswerCallbackQuery(callback.Id, cancellationToken: ct);
         }
-        catch
-        { /* ignore callback ack failures */
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (ApiRequestException ex)
+        {
+            Console.Error.WriteLine($"⚠️ Callback acknowledgement failed: {ex.GetType().Name}");
         }
 
         try
@@ -247,17 +269,32 @@ internal class UpdateRouter
                 return;
             }
 
-            if (callback.Data.StartsWith(CallbackData.TariffPrefix))
+            if (callback.Data.StartsWith(CallbackData.TariffPrefix, StringComparison.Ordinal))
                 await _tariffHandler(callback, ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
         }
         catch (Exception ex)
         {
-            LogError($"Callback '{callback.Data}' from {callback.From.Id}", ex);
+            LogError("Callback handler", ex);
         }
     }
 
     private static void LogError(string context, Exception ex)
     {
-        Console.WriteLine($"❌ [{context}] {ex.GetType().Name}: {ex.Message}");
+        Console.Error.WriteLine($"❌ [{context}] {ex.GetType().Name}");
+    }
+
+    private static bool IsCommand(string text, string command)
+    {
+        if (!text.StartsWith(command, StringComparison.Ordinal))
+            return false;
+
+        if (text.Length == command.Length)
+            return true;
+
+        return text[command.Length] is ' ' or '@';
     }
 }

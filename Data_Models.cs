@@ -18,6 +18,10 @@ namespace KeyBot
         public long UserId { get; set; }
         public string Payload { get; set; } = "";
         public int Amount { get; set; }
+        public int TariffDays { get; set; }
+        public string InvoiceId { get; set; } = "";
+        public string PaymentAmount { get; set; } = "";
+        public bool CustomerNotified { get; set; }
         public string Timestamp { get; set; } = "";
         public string Status { get; set; } = "completed";
     }
@@ -29,6 +33,7 @@ namespace KeyBot
         public string Expires { get; set; } = "";
         public bool Active { get; set; } = true;
         public int TariffDays { get; set; }
+        public string? PaymentOrderId { get; set; }
         public string? FrozenAt { get; set; } // дата заморозки, null = активна
     }
 

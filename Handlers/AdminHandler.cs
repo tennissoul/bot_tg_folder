@@ -106,11 +106,15 @@ public partial class AdminHandler
                 success++;
                 await Task.Delay(50, ct);
             }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
             catch (Exception ex)
             {
                 failed++;
                 if (failed <= 5)
-                    Console.WriteLine($"⚠️ Broadcast fail to {uid}: {ex.Message}");
+                    Console.Error.WriteLine($"⚠️ Broadcast delivery failed: {ex.GetType().Name}");
             }
         }
         await _bot.SendMessage(
@@ -164,7 +168,14 @@ public partial class AdminHandler
                     cancellationToken: ct
                 );
             }
-            catch { }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"⚠️ Admin notification failed: {ex.GetType().Name}");
+            }
         }
         requestShutdown();
     }

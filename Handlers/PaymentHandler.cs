@@ -1,8 +1,10 @@
-using System.Text.RegularExpressions;
-using KeyBot;
+using System;
+using System.Net.Http;
+using System.Threading;
 using KeyBot.Models;
 using KeyBot.Services;
 using Telegram.Bot;
+using Telegram.Bot.Exceptions;
 using Telegram.Bot.Types;
 
 namespace KeyBot.Handlers;
@@ -13,6 +15,7 @@ public class PaymentHandler
     private readonly IPaymentService _paymentService;
     private readonly IKeyService _keyService;
     private readonly ITransactionService _transactionService;
+    private readonly DatabaseManager _databaseManager;
     private readonly IUIService _uiService;
     private readonly IUserService _userService;
     private readonly long[] _adminIds;
@@ -22,6 +25,7 @@ public class PaymentHandler
         IPaymentService paymentService,
         IKeyService keyService,
         ITransactionService transactionService,
+        DatabaseManager databaseManager,
         IUIService uiService,
         IUserService userService,
         long[] adminIds
@@ -31,6 +35,7 @@ public class PaymentHandler
         _paymentService = paymentService;
         _keyService = keyService;
         _transactionService = transactionService;
+        _databaseManager = databaseManager;
         _uiService = uiService;
         _userService = userService;
         _adminIds = adminIds;
@@ -56,25 +61,12 @@ public class PaymentHandler
         CancellationToken ct
     )
     {
-        if (callback.Message == null)
+        if (callback.Message is null)
             return;
-
-        // Защита от невалидных параметров
-        if (days <= 0 || days > 3650 || price < 0)
-        {
-            await _bot.AnswerCallbackQuery(
-                callback.Id,
-                "❌ Invalid tariff parameters.",
-                showAlert: true,
-                cancellationToken: ct
-            );
-            return;
-        }
 
         var lang = await _userService.GetLanguageAsync(userId);
-
         var tariff = Tariffs.GetByDays(days);
-        if (tariff == null)
+        if (days is <= 0 or > 3650 || price < 0 || tariff is null || price != tariff.PriceRub)
         {
             await _bot.AnswerCallbackQuery(
                 callback.Id,
@@ -85,138 +77,172 @@ public class PaymentHandler
             return;
         }
 
-        // Получаем ссылку на оплату через CryptoPay
-        string paymentLink = await _paymentService.CreatePaymentLinkAsync(tariff, userId, ct);
+        if (_paymentService.IsTestMode)
+            await HandleTestPurchaseAsync(callback, userId, tariff, lang, ct);
+        else
+            await CreateCryptoPayPurchaseAsync(callback, userId, tariff, lang, ct);
+    }
 
-        if (string.IsNullOrEmpty(paymentLink))
+    private async Task HandleTestPurchaseAsync(
+        CallbackQuery callback,
+        long userId,
+        TariffModel tariff,
+        UserLanguage lang,
+        CancellationToken ct
+    )
+    {
+        await _bot.AnswerCallbackQuery(
+            callback.Id,
+            Loc.TestModePrefix(lang) + ": key created without payment",
+            showAlert: true,
+            cancellationToken: ct
+        );
+
+        var key = await _keyService.GenerateKeyAsync(userId, tariff.Days);
+        await _transactionService.RecordTransactionAsync(
+            userId,
+            $"test_{tariff.Days}d_{tariff.PriceRub}rub",
+            tariff.PriceRub
+        );
+        await SendPurchaseConfirmationAsync(
+            callback.Message!.Chat.Id,
+            tariff.Days,
+            tariff.PriceRub,
+            key,
+            Loc.TestModeSuccess,
+            lang,
+            ct
+        );
+        await NotifyTestSaleAsync(lang, userId, tariff, ct);
+    }
+
+    private async Task CreateCryptoPayPurchaseAsync(
+        CallbackQuery callback,
+        long userId,
+        TariffModel tariff,
+        UserLanguage lang,
+        CancellationToken ct
+    )
+    {
+        var orderId = Guid.NewGuid().ToString("N");
+        var invoice = await _paymentService.CreateInvoiceAsync(tariff, orderId, ct);
+        if (invoice is null || !await PersistInvoiceAsync(orderId, userId, tariff, invoice, ct))
         {
-            await _bot.AnswerCallbackQuery(
-                callback.Id,
-                Loc.PaymentError(lang),
-                showAlert: true,
-                cancellationToken: ct
-            );
+            await ShowPaymentErrorAsync(callback.Id, lang, ct);
             return;
         }
 
-        // ПРОВЕРКА НА ТЕСТОВЫЙ РЕЖИМ
-        if (paymentLink.StartsWith("TEST_MODE_"))
-        {
-            // Тестовый режим - сразу выдаём ключ без оплаты
-            await _bot.AnswerCallbackQuery(
-                callback.Id,
-                Loc.TestModePrefix(lang) + ": key created without payment",
-                showAlert: true,
-                cancellationToken: ct
-            );
+        await SendInvoiceLinkAsync(callback, tariff, invoice, lang, ct);
+    }
 
-            // Создаём ключ
-            string key = await _keyService.GenerateKeyAsync(userId, days);
-            await _transactionService.RecordTransactionAsync(
-                userId,
-                $"test_{days}d_{price}rub",
-                price
-            );
+    private async Task<bool> PersistInvoiceAsync(
+        string orderId,
+        long userId,
+        TariffModel tariff,
+        CryptoPayInvoice invoice,
+        CancellationToken ct
+    )
+    {
+        await _transactionService.RecordPendingPaymentAsync(
+            orderId,
+            userId,
+            tariff.Days,
+            decimal.ToInt32(tariff.PriceRub),
+            invoice.InvoiceId,
+            invoice.Amount
+        );
+        return await _databaseManager.SaveAsync(ct);
+    }
 
-            var expiresAt = DateTime.UtcNow.AddDays(days);
-
-            string successText = Loc.TestModeSuccess(
-                lang,
-                days,
-                price,
-                key,
-                expiresAt.ToString("yyyy-MM-dd HH:mm")
-            );
-
-            await _bot.SendMessage(
-                callback.Message.Chat.Id,
-                successText,
-                parseMode: Telegram.Bot.Types.Enums.ParseMode.Html,
-                replyMarkup: _uiService.GetMainMenu(lang),
-                cancellationToken: ct
-            );
-
-            // Уведомляем администраторов о тестовой покупке
-            string adminText = Loc.AdminTestSale(lang, userId, days, price);
-
-            foreach (var adminId in _adminIds)
-            {
-                try
-                {
-                    await _bot.SendMessage(
-                        adminId,
-                        adminText,
-                        parseMode: Telegram.Bot.Types.Enums.ParseMode.Html,
-                        cancellationToken: ct
-                    );
-                }
-                catch { }
-            }
-
-            return;
-        }
-
-        // РЕАЛЬНЫЙ ПЛАТЁЖ
-        string paymentMsg = Loc.TariffPaymentInfo(lang, tariff.Name, tariff.PriceRub, days);
-
+    private async Task SendInvoiceLinkAsync(
+        CallbackQuery callback,
+        TariffModel tariff,
+        CryptoPayInvoice invoice,
+        UserLanguage lang,
+        CancellationToken ct
+    )
+    {
         var keyboard = new Telegram.Bot.Types.ReplyMarkups.InlineKeyboardMarkup(
             Telegram.Bot.Types.ReplyMarkups.InlineKeyboardButton.WithUrl(
                 Loc.PayButton(lang),
-                paymentLink
+                invoice.PayUrl
             )
         );
-
         await _bot.SendMessage(
-            callback.Message.Chat.Id,
-            paymentMsg,
+            callback.Message!.Chat.Id,
+            Loc.TariffPaymentInfo(lang, tariff.Name, tariff.PriceRub, tariff.Days),
             parseMode: Telegram.Bot.Types.Enums.ParseMode.Html,
             replyMarkup: keyboard,
             cancellationToken: ct
         );
-
         await _bot.AnswerCallbackQuery(callback.Id, cancellationToken: ct);
     }
 
-    public async Task HandleSuccessfulPaymentAsync(
-        long userId,
+    private Task ShowPaymentErrorAsync(
+        string callbackId,
+        UserLanguage lang,
+        CancellationToken ct
+    ) =>
+        _bot.AnswerCallbackQuery(
+            callbackId,
+            Loc.PaymentError(lang),
+            showAlert: true,
+            cancellationToken: ct
+        );
+
+    private async Task SendPurchaseConfirmationAsync(
+        long chatId,
         int days,
         decimal amount,
-        CancellationToken ct,
-        Action<long, string> notifyAdmins
+        string key,
+        Func<UserLanguage, int, decimal, string, string, string> messageFactory,
+        UserLanguage lang,
+        CancellationToken ct
     )
     {
-        var lang = await _userService.GetLanguageAsync(userId);
-
-        // Создаём ключ
-        string key = await _keyService.GenerateKeyAsync(userId, days);
-
-        // Записываем транзакцию
-        await _transactionService.RecordTransactionAsync(
-            userId,
-            $"key_{days}d_{amount}rub",
-            amount
-        );
-
         var expiresAt = DateTime.UtcNow.AddDays(days);
-
-        string successText = Loc.PaymentSuccess(
-            lang,
-            days,
-            amount,
-            key,
-            expiresAt.ToString("yyyy-MM-dd HH:mm")
-        );
-
         await _bot.SendMessage(
-            userId,
-            successText,
+            chatId,
+            messageFactory(lang, days, amount, key, expiresAt.ToString("yyyy-MM-dd HH:mm")),
             parseMode: Telegram.Bot.Types.Enums.ParseMode.Html,
             replyMarkup: _uiService.GetMainMenu(lang),
             cancellationToken: ct
         );
+    }
 
-        // Уведомляем администраторов
-        string adminText = Loc.AdminNewSale(lang, userId, days, amount);
-        notifyAdmins(userId, adminText);
+    private async Task NotifyTestSaleAsync(
+        UserLanguage lang,
+        long userId,
+        TariffModel tariff,
+        CancellationToken ct
+    )
+    {
+        var message = Loc.AdminTestSale(lang, userId, tariff.Days, tariff.PriceRub);
+        foreach (var adminId in _adminIds)
+            await SendAdminNotificationAsync(adminId, message, ct);
+    }
+
+    private async Task SendAdminNotificationAsync(
+        long adminId,
+        string message,
+        CancellationToken ct
+    )
+    {
+        try
+        {
+            await _bot.SendMessage(adminId, message, cancellationToken: ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (ApiRequestException ex)
+        {
+            Console.Error.WriteLine($"⚠️ Admin test-sale notification failed: {ex.GetType().Name}");
+        }
+        catch (HttpRequestException ex)
+        {
+            Console.Error.WriteLine($"⚠️ Admin test-sale notification failed: {ex.GetType().Name}");
+        }
     }
 }

@@ -84,14 +84,20 @@ public class ReferralHandler
         CancellationToken ct
     )
     {
-        if (string.IsNullOrEmpty(startParam))
+        if (
+            string.IsNullOrEmpty(startParam)
+            || startParam.Length > 8
+            || startParam.Any(character =>
+                !"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789".Contains(character)
+            )
+        )
             return;
 
         // Ищем владельца кода среди пользователей
         var allUserIds = await GetAllUserIdsAsync();
         foreach (var candidateId in allUserIds)
         {
-            if (_referralService.GetRefCode(candidateId) == startParam)
+            if (string.Equals(_referralService.GetRefCode(candidateId), startParam, StringComparison.Ordinal))
             {
                 await _referralService.RegisterReferralAsync(candidateId, newUserId);
                 return;
@@ -105,7 +111,7 @@ public class ReferralHandler
         _getAllUserIds?.Invoke() ?? Task.FromResult(new List<long>());
 
     private static string BuildReferralTextRu(string botLink, string code, ReferralStats s) =>
-        "🤝 <b>Реферальная программа Enkephalin</b>\n\n"
+        "🤝 <b>Реферальная программа Merchant</b>\n\n"
         + "Приводи друзей и получай бонусы! Просто отправь ссылку, и после покупки друга "
         + "тебе автоматически начислятся бесплатные дни, а другу — 3 дня в подарок!\n\n"
         + $"🤖 <b>Твоя реферальная ссылка:</b>\n<code>{botLink}</code>\n"
@@ -124,7 +130,7 @@ public class ReferralHandler
         + "• Бонусы начисляются через 48 часов после покупки.";
 
     private static string BuildReferralTextEn(string botLink, string code, ReferralStats s) =>
-        "🤝 <b>Enkephalin Referral Program</b>\n\n"
+        "🤝 <b>Merchant Referral Program</b>\n\n"
         + "Invite friends and earn bonuses! Share your link, and after your friend's purchase "
         + "you get free days automatically, and your friend gets 3 days as a gift!\n\n"
         + $"🤖 <b>Your referral link:</b>\n<code>{botLink}</code>\n"

@@ -37,7 +37,7 @@ public class UIService : IUIService
                 InlineKeyboardButton.WithCallbackData(Loc.BtnReferral(lang), "referral"),
                 InlineKeyboardButton.WithCallbackData(Loc.BtnAbout(lang), "about"),
             ],
-            [InlineKeyboardButton.WithUrl(Loc.BtnChannel(lang), "https://t.me/EnkephalinVPN")],
+            [InlineKeyboardButton.WithUrl(Loc.BtnChannel(lang), "https://t.me/merchant_vpn")],
             [InlineKeyboardButton.WithCallbackData(Loc.BtnLanguage(lang), "language_menu")],
             [InlineKeyboardButton.WithCallbackData(Loc.BtnAdmin(lang), "admin_panel")],
         ]);

@@ -7,12 +7,12 @@ namespace KeyBot.Services;
 /// <summary>Фабрика для создания HttpClient с поддержкой прокси.</summary>
 public static class HttpClientFactory
 {
-    public static HttpClient BuildHttpClient()
+    public static async Task<HttpClient> BuildHttpClientAsync(CancellationToken ct = default)
     {
         var proxyConfigPath = FindProxyConfig();
         var proxy = ProxySettings.Load(proxyConfigPath).CreateWebProxy();
 
-        if (proxy != null && ProxyIsReachable(proxy))
+        if (proxy != null && await ProxyIsReachableAsync(proxy, ct))
         {
             Console.WriteLine($"✓ Используется прокси: {proxy.Address}");
             return new HttpClient(
@@ -52,15 +52,25 @@ public static class HttpClientFactory
         return candidates[0];
     }
 
-    private static bool ProxyIsReachable(WebProxy proxy)
+    private static async Task<bool> ProxyIsReachableAsync(
+        WebProxy proxy,
+        CancellationToken ct
+    )
     {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeout.CancelAfter(TimeSpan.FromSeconds(2));
         try
         {
             var uri = proxy.Address!;
             using var tcp = new TcpClient();
-            return tcp.ConnectAsync(uri.Host, uri.Port).Wait(TimeSpan.FromSeconds(2));
+            await tcp.ConnectAsync(uri.Host, uri.Port, timeout.Token);
+            return true;
         }
-        catch
+        catch (SocketException)
+        {
+            return false;
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
             return false;
         }

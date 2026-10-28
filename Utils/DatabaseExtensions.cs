@@ -1,6 +1,8 @@
 using System;
 using System.IO;
 using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace KeyBot.Utils;
 
@@ -8,47 +10,65 @@ public static class DatabaseExtensions
 {
     public static void LoadFromJson(this Database database, string filePath)
     {
-        try
-        {
-            if (System.IO.File.Exists(filePath))
-            {
-                string json = System.IO.File.ReadAllText(filePath);
-                var options = JsonSetup.GetOptions();
-                var loaded = JsonSerializer.Deserialize(json, BotJsonContext.Default.Database);
+        if (!System.IO.File.Exists(filePath))
+            return;
 
-                if (loaded != null)
-                {
-                    database.Users = loaded.Users;
-                    database.Keys = loaded.Keys;
-                    database.Transactions = loaded.Transactions;
-                    database.BannedUsers = loaded.BannedUsers;
-                }
-            }
-        }
-        catch (Exception ex)
+        string json = System.IO.File.ReadAllText(filePath);
+        var loaded = JsonSerializer.Deserialize(json, BotJsonContext.Default.Database);
+
+        if (loaded == null)
+            throw new InvalidDataException("Database file contains no database document.");
+
+        lock (database.SyncRoot)
         {
-            Console.WriteLine($"❌ Ошибка загрузки БД: {ex.Message}");
+            database.Users = loaded.Users;
+            database.Keys = loaded.Keys;
+            database.Transactions = loaded.Transactions;
+            database.BannedUsers = loaded.BannedUsers;
+            database.Referrals = loaded.Referrals;
+            database.ReferralBalance = loaded.ReferralBalance;
         }
     }
 
-    public static void SaveToJson(this Database database, string filePath)
+    public static async Task SaveToJsonAsync(
+        this Database database,
+        string filePath,
+        CancellationToken cancellationToken
+    )
     {
+        byte[] json;
+        lock (database.SyncRoot)
+            json = JsonSerializer.SerializeToUtf8Bytes(database, BotJsonContext.Default.Database);
+
+        string fullPath = Path.GetFullPath(filePath);
+        string? directory = Path.GetDirectoryName(fullPath);
+        if (!string.IsNullOrEmpty(directory))
+            Directory.CreateDirectory(directory);
+
+        string temporaryPath = fullPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
         {
-            var options = JsonSetup.GetOptions();
-            string json = JsonSerializer.Serialize(database, BotJsonContext.Default.Database);
-
-            string? directory = Path.GetDirectoryName(filePath);
-            if (!string.IsNullOrEmpty(directory) && !Directory.Exists(directory))
+            await using (
+                var stream = new FileStream(
+                    temporaryPath,
+                    FileMode.CreateNew,
+                    FileAccess.Write,
+                    FileShare.None,
+                    4096,
+                    FileOptions.Asynchronous
+                )
+            )
             {
-                Directory.CreateDirectory(directory);
+                await stream.WriteAsync(json, cancellationToken);
+                await stream.FlushAsync(cancellationToken);
             }
 
-            System.IO.File.WriteAllText(filePath, json);
+            File.Move(temporaryPath, fullPath, overwrite: true);
         }
-        catch (Exception ex)
+        finally
         {
-            Console.WriteLine($"❌ Ошибка сохранения БД: {ex.Message}");
+            if (File.Exists(temporaryPath))
+                File.Delete(temporaryPath);
         }
     }
 }

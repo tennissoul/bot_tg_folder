@@ -15,8 +15,12 @@ public partial class AdminHandler
             await _bot.SendMessage(message.Chat.Id, Loc.NoPermission(lang), cancellationToken: ct);
             return;
         }
-        var parts = (message.Text ?? "").Split(' ');
-        if (parts.Length < 2 || !long.TryParse(parts[1], out var userId))
+        var parts = (message.Text ?? "").Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (
+            parts.Length < 2
+            || !long.TryParse(parts[1], out var userId)
+            || userId <= 0
+        )
         {
             await _bot.SendMessage(message.Chat.Id, Loc.BanFormat(lang), cancellationToken: ct);
             return;
@@ -39,8 +43,12 @@ public partial class AdminHandler
             await _bot.SendMessage(message.Chat.Id, Loc.NoPermission(lang), cancellationToken: ct);
             return;
         }
-        var parts = (message.Text ?? "").Split(' ');
-        if (parts.Length < 2 || !long.TryParse(parts[1], out var userId))
+        var parts = (message.Text ?? "").Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (
+            parts.Length < 2
+            || !long.TryParse(parts[1], out var userId)
+            || userId <= 0
+        )
         {
             await _bot.SendMessage(
                 message.Chat.Id,

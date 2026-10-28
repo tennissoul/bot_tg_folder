@@ -2,6 +2,7 @@ using System.Net.Http;
 using KeyBot.Configuration;
 using KeyBot.Handlers;
 using KeyBot.Services;
+using KeyBot.Utils;
 using Telegram.Bot;
 
 namespace KeyBot.App;
@@ -30,7 +31,10 @@ public class BotApplication
         using var cts = new CancellationTokenSource();
         _cts = cts;
 
-        var bot = new TelegramBotClient(_config.BotToken, HttpClientFactory.BuildHttpClient());
+        using var telegramHttpClient = await HttpClientFactory.BuildHttpClientAsync(cts.Token);
+        using var paymentHttpClient = await HttpClientFactory.BuildHttpClientAsync(cts.Token);
+        using var assistantHttpClient = await HttpClientFactory.BuildHttpClientAsync(cts.Token);
+        var bot = new TelegramBotClient(_config.BotToken, telegramHttpClient);
 
         try
         {
@@ -41,19 +45,32 @@ public class BotApplication
             await bot.DropPendingUpdates(cts.Token);
             Console.WriteLine("✓ Pending updates сброшены");
         }
-        catch (Exception ex)
+        catch (ApiRequestException ex)
         {
-            Console.WriteLine($"❌ Не удалось подключиться к Telegram: {ex.Message}");
-            return;
+            Console.Error.WriteLine(
+                $"❌ Не удалось подключиться к Telegram ({ex.GetType().Name})"
+            );
+            throw;
+        }
+        catch (HttpRequestException ex)
+        {
+            Console.Error.WriteLine(
+                $"❌ Не удалось подключиться к Telegram ({ex.GetType().Name})"
+            );
+            throw;
         }
 
-        var router = BuildRouter(bot);
+        var (router, paymentHandler, paymentService, paymentProcessor) = BuildRouter(
+            bot,
+            paymentHttpClient,
+            assistantHttpClient
+        );
 
         bot.OnError += (ex, source) =>
         {
             if (ex is OperationCanceledException)
                 return Task.CompletedTask;
-            Console.WriteLine($"⚠️ [PollingError] {source}: {ex.Message}");
+            Console.Error.WriteLine($"⚠️ [PollingError] {source}: {ex.GetType().Name}");
             return Task.CompletedTask;
         };
 
@@ -66,7 +83,7 @@ public class BotApplication
             catch (OperationCanceledException) { }
             catch (Exception ex)
             {
-                Console.WriteLine($"❌ [OnMessage] {ex.Message}");
+                Console.Error.WriteLine($"❌ [OnMessage] {ex.GetType().Name}");
             }
         };
 
@@ -79,51 +96,101 @@ public class BotApplication
             catch (OperationCanceledException) { }
             catch (Exception ex)
             {
-                Console.WriteLine($"❌ [OnUpdate] {ex.Message}");
+                Console.Error.WriteLine($"❌ [OnUpdate] {ex.GetType().Name}");
             }
         };
 
         Console.WriteLine("🤖 Бот успешно запущен и работает");
         _dbManager.StartAutoSave();
+        CryptoPayWebhookHost? webhookHost = null;
 
         try
         {
-            _tcs = new TaskCompletionSource();
+            if (!string.IsNullOrEmpty(_config.CryptoPayToken))
+            {
+                webhookHost = CryptoPayWebhookHost.Create(
+                    _config.CryptoPayWebhookListenUrl,
+                    paymentService,
+                    paymentProcessor
+                );
+                await webhookHost.StartAsync(cts.Token);
+            }
+
+            _tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             Console.CancelKeyPress += (_, e) =>
             {
                 e.Cancel = true;
                 Console.WriteLine("⌨️ Получен сигнал остановки...");
                 RequestShutdown();
             };
-            await _tcs.Task;
+            if (webhookHost is null)
+                await _tcs.Task;
+            else
+            {
+                var completedTask = await Task.WhenAny(_tcs.Task, webhookHost.Completion);
+                if (completedTask != _tcs.Task)
+                    throw new InvalidOperationException("CryptoPay webhook listener stopped unexpectedly.");
+                await _tcs.Task;
+            }
         }
         finally
         {
             Console.WriteLine("🛑 Остановка бота...");
-            _dbManager.Stop();
-            _cts = null;
-            Console.WriteLine("✓ Бот остановлен");
+            try
+            {
+                if (webhookHost is not null)
+                    await webhookHost.StopAsync(CancellationToken.None);
+            }
+            finally
+            {
+                try
+                {
+                    if (webhookHost is not null)
+                        await webhookHost.DisposeAsync();
+                }
+                finally
+                {
+                    _cts = null;
+                    await _dbManager.StopAsync();
+                    Console.WriteLine("✓ Бот остановлен");
+                }
+            }
         }
     }
 
     private void RequestShutdown()
     {
-        Console.WriteLine($"🔍 Shutdown triggered! Стэк: {Environment.StackTrace}");
+        Console.WriteLine("🛑 Получен запрос на остановку бота.");
         _cts?.Cancel();
         _tcs?.TrySetResult();
     }
 
     // ── Сборка роутера ───────────────────────────────────────────────────────
 
-    private UpdateRouter BuildRouter(ITelegramBotClient bot)
+    private (
+        UpdateRouter Router,
+        PaymentHandler PaymentHandler,
+        IPaymentService PaymentService,
+        CryptoPayPaymentProcessor PaymentProcessor
+    )
+        BuildRouter(
+        ITelegramBotClient bot,
+        HttpClient paymentHttpClient,
+        HttpClient assistantHttpClient
+    )
     {
         var userService = new UserService(_database) as IUserService;
         var keyService = new KeyService(_database) as IKeyService;
         var transactionService = new TransactionService(_database) as ITransactionService;
-        var paymentService = new CryptoPayService(_config.CryptoPayToken) as IPaymentService;
+        var paymentService = new CryptoPayService(
+            _config.CryptoPayToken,
+            paymentHttpClient,
+            _config.AllowTestPayments,
+            _config.CryptoPayWebhookUrl
+        );
         var uiService = new UIService() as IUIService;
-        var copilotService =
-            new OpenRouterService(new(), _config.OpenRouterKey) as IOpenRouterService;
+        var copilotService = new OpenRouterService(assistantHttpClient, _config.OpenRouterKey)
+            as IOpenRouterService;
 
         var supportWaitState = new ConcurrentDictionary<long, bool>();
 
@@ -140,6 +207,16 @@ public class BotApplication
             paymentService,
             keyService,
             transactionService,
+            _dbManager,
+            uiService,
+            userService,
+            _config.AdminIds
+        );
+        var paymentProcessor = new CryptoPayPaymentProcessor(
+            bot,
+            keyService,
+            transactionService,
+            _dbManager,
             uiService,
             userService,
             _config.AdminIds
@@ -190,7 +267,7 @@ public class BotApplication
             uiService
         );
 
-        return new UpdateRouter(
+        var router = new UpdateRouter(
             bot,
             messageHandler,
             uiService,
@@ -201,7 +278,9 @@ public class BotApplication
             callbackHandlers.BuildCallbackHandlers(),
             callbackHandlers.HandleTariffPurchaseAsync,
             referralHandler,
-            adminHandler
+            adminHandler,
+            new UpdateRateLimiter()
         );
+        return (router, paymentHandler, paymentService, paymentProcessor);
     }
 }

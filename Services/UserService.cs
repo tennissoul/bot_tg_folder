@@ -18,7 +18,6 @@ public interface IUserService
 public class UserService : IUserService
 {
     private readonly Database _database;
-    private readonly object _banLock = new();
 
     public UserService(Database database, object? _ = null)
     {
@@ -27,36 +26,47 @@ public class UserService : IUserService
 
     public Task<UserModel?> GetUserAsync(long userId)
     {
-        if (!_database.Users.TryGetValue(userId.ToString(), out var d))
-            return Task.FromResult<UserModel?>(null);
-        return Task.FromResult<UserModel?>(
-            new()
-            {
-                Id = userId,
-                Username = d.Username,
-                FirstSeen = DateTime.Parse(d.FirstSeen),
-                PurchaseCount = d.Purchases,
-                TotalSpent = d.TotalSpent,
-            }
-        );
+        lock (_database.SyncRoot)
+        {
+            if (!_database.Users.TryGetValue(userId.ToString(), out var data))
+                return Task.FromResult<UserModel?>(null);
+            return Task.FromResult<UserModel?>(
+                new()
+                {
+                    Id = userId,
+                    Username = data.Username,
+                    FirstSeen = DateTime.Parse(data.FirstSeen),
+                    PurchaseCount = data.Purchases,
+                    TotalSpent = data.TotalSpent,
+                }
+            );
+        }
     }
 
-    public Task<bool> AddUserAsync(long userId, string username) =>
-        Task.FromResult(
-            _database.Users.TryAdd(
-                userId.ToString(),
-                new UserData
-                {
-                    UserId = userId,
-                    Username = username,
-                    FirstSeen = DateTime.UtcNow.ToString("o"),
-                }
-            )
-        );
+    public Task<bool> AddUserAsync(long userId, string username)
+    {
+        if (userId <= 0)
+            return Task.FromResult(false);
+
+        lock (_database.SyncRoot)
+        {
+            return Task.FromResult(
+                _database.Users.TryAdd(
+                    userId.ToString(),
+                    new UserData
+                    {
+                        UserId = userId,
+                        Username = username,
+                        FirstSeen = DateTime.UtcNow.ToString("o"),
+                    }
+                )
+            );
+        }
+    }
 
     public Task<bool> BanUserAsync(long userId)
     {
-        lock (_banLock)
+        lock (_database.SyncRoot)
         {
             if (!_database.BannedUsers.Contains(userId))
                 _database.BannedUsers.Add(userId);
@@ -66,7 +76,7 @@ public class UserService : IUserService
 
     public Task<bool> UnbanUserAsync(long userId)
     {
-        lock (_banLock)
+        lock (_database.SyncRoot)
         {
             _database.BannedUsers.Remove(userId);
         }
@@ -75,7 +85,7 @@ public class UserService : IUserService
 
     public Task<bool> IsUserBannedAsync(long userId)
     {
-        lock (_banLock)
+        lock (_database.SyncRoot)
         {
             return Task.FromResult(_database.BannedUsers.Contains(userId));
         }
@@ -83,26 +93,40 @@ public class UserService : IUserService
 
     public Task<List<long>> GetAllUserIdsAsync()
     {
-        var ids = new List<long>(_database.Users.Count);
-        foreach (var k in _database.Users.Keys)
-            if (long.TryParse(k, out var id))
-                ids.Add(id);
-        return Task.FromResult(ids);
+        lock (_database.SyncRoot)
+        {
+            var ids = new List<long>(_database.Users.Count);
+            foreach (var key in _database.Users.Keys)
+                if (long.TryParse(key, out var id))
+                    ids.Add(id);
+            return Task.FromResult(ids);
+        }
     }
 
     public Task<UserLanguage> GetLanguageAsync(long userId) =>
-        Task.FromResult(
-            _database.Users.TryGetValue(userId.ToString(), out var u)
-                ? u.Language == "en"
-                    ? UserLanguage.English
-                    : UserLanguage.Russian
-                : UserLanguage.Russian
-        );
+        GetLanguageCore(userId);
 
     public Task SetLanguageAsync(long userId, UserLanguage lang)
     {
-        if (_database.Users.TryGetValue(userId.ToString(), out var u))
-            u.Language = lang == UserLanguage.English ? "en" : "ru";
+        lock (_database.SyncRoot)
+        {
+            if (_database.Users.TryGetValue(userId.ToString(), out var user))
+                user.Language = lang == UserLanguage.English ? "en" : "ru";
+        }
         return Task.CompletedTask;
+    }
+
+    private Task<UserLanguage> GetLanguageCore(long userId)
+    {
+        lock (_database.SyncRoot)
+        {
+            return Task.FromResult(
+                _database.Users.TryGetValue(userId.ToString(), out var user)
+                    ? user.Language == "en"
+                        ? UserLanguage.English
+                        : UserLanguage.Russian
+                    : UserLanguage.Russian
+            );
+        }
     }
 }

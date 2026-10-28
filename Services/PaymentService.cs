@@ -1,7 +1,9 @@
 using System;
 using System.Net.Http;
+using System.Security.Cryptography;
 using System.Text;
-using System.Text.RegularExpressions;
+using System.Text.Json;
+using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
 using KeyBot.Models;
@@ -10,16 +12,11 @@ namespace KeyBot.Services;
 
 public interface IPaymentService
 {
-    Task<bool> ValidateInvoiceAsync(string invoicePayload, CancellationToken ct = default);
-    Task<string> CreatePaymentLinkAsync(
+    bool IsTestMode { get; }
+    bool ValidateWebhookSignature(ReadOnlySpan<byte> body, string signature);
+    Task<CryptoPayInvoice?> CreateInvoiceAsync(
         TariffModel tariff,
-        long userId,
-        CancellationToken ct = default
-    );
-    Task<bool> ProcessPaymentAsync(
-        long userId,
-        int days,
-        decimal amount,
+        string orderId,
         CancellationToken ct = default
     );
 }
@@ -28,41 +25,60 @@ public class CryptoPayService : IPaymentService
 {
     private readonly string _apiToken;
     private readonly HttpClient _httpClient;
+    private readonly string _webhookUrl;
     private const string ApiBaseUrl = "https://pay.crypt.bot/api";
-    private readonly bool _isTestMode;
+    public bool IsTestMode { get; }
 
-    public CryptoPayService(string apiToken)
+    public CryptoPayService(
+        string apiToken,
+        HttpClient httpClient,
+        bool allowTestPayments,
+        string webhookUrl
+    )
     {
         _apiToken = apiToken;
-        _httpClient = new HttpClient();
-        _isTestMode = string.IsNullOrEmpty(apiToken);
+        _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
+        _webhookUrl = webhookUrl;
+        IsTestMode = allowTestPayments && string.IsNullOrEmpty(apiToken);
 
-        if (_isTestMode)
+        if (IsTestMode)
         {
-            Console.WriteLine("⚠️ CryptoPay: ТЕСТОВЫЙ РЕЖИМ (без реальных платежей)");
+            Console.WriteLine("⚠️ CryptoPay: явно включён тестовый режим без реальных платежей");
         }
     }
 
-    public async Task<bool> ValidateInvoiceAsync(
-        string invoicePayload,
-        CancellationToken ct = default
-    )
+    public bool ValidateWebhookSignature(ReadOnlySpan<byte> body, string signature)
     {
-        return !string.IsNullOrEmpty(invoicePayload);
+        if (string.IsNullOrEmpty(_apiToken) || signature.Length != 64)
+            return false;
+
+        byte[] receivedSignature;
+        try
+        {
+            receivedSignature = Convert.FromHexString(signature);
+        }
+        catch (FormatException)
+        {
+            return false;
+        }
+        if (receivedSignature.Length != 32)
+            return false;
+
+        var secret = SHA256.HashData(Encoding.UTF8.GetBytes(_apiToken));
+        var expectedSignature = HMACSHA256.HashData(secret, body);
+        return CryptographicOperations.FixedTimeEquals(expectedSignature, receivedSignature);
     }
 
-    public async Task<string> CreatePaymentLinkAsync(
+    public async Task<CryptoPayInvoice?> CreateInvoiceAsync(
         TariffModel tariff,
-        long userId,
+        string orderId,
         CancellationToken ct = default
     )
     {
-        if (_isTestMode || string.IsNullOrEmpty(_apiToken))
+        if (string.IsNullOrEmpty(_apiToken))
         {
-            Console.WriteLine(
-                $"🧪 ТЕСТ: Ключ для {userId} на {tariff.Days} дней за {tariff.PriceRub}₽"
-            );
-            return $"TEST_MODE_{userId}_{tariff.Days}_{tariff.PriceRub}";
+            Console.WriteLine("❌ CryptoPay не настроен; ссылка на оплату не создана");
+            return null;
         }
 
         try
@@ -76,61 +92,122 @@ public class CryptoPayService : IPaymentService
                 Console.WriteLine($"⚠️ Минимальная сумма 1 USDT для тарифа {tariff.Days} дней");
             }
 
-            Console.WriteLine($"💰 Создаём платеж: {usdtAmount} USDT для {userId}");
+            Console.WriteLine($"💰 Создаём платёж: {usdtAmount} USDT");
 
             // Ручной JSON (без сериализатора)
             string amountStr = usdtAmount.ToString(
                 "0.00",
-                System.Globalization.CultureInfo.InvariantCulture
+                CultureInfo.InvariantCulture
             );
-            string json =
-                $"{{\"asset\":\"USDT\",\"amount\":\"{amountStr}\",\"description\":\"Key for {userId} - {tariff.Days} days\",\"hidden_message\":\"{userId}_{tariff.Days}_{tariff.PriceRub}\"}}";
+            string json = JsonSerializer.Serialize(
+                new
+                {
+                    asset = "USDT",
+                    amount = amountStr,
+                    description = $"VPN subscription - {tariff.Days} days",
+                    payload = orderId,
+                    webhook_url = _webhookUrl,
+                }
+            );
 
-            var content = new StringContent(json, Encoding.UTF8, "application/json");
-            var httpRequest = new HttpRequestMessage(HttpMethod.Post, $"{ApiBaseUrl}/createInvoice")
+            using var content = new StringContent(json, Encoding.UTF8, "application/json");
+            using var httpRequest = new HttpRequestMessage(
+                HttpMethod.Post,
+                $"{ApiBaseUrl}/createInvoice"
+            )
             {
                 Content = content,
                 Headers = { { "Crypto-Pay-API-Token", _apiToken } },
             };
 
-            var response = await _httpClient.SendAsync(httpRequest, ct);
-            var responseContent = await response.Content.ReadAsStringAsync(ct);
+            using var response = await _httpClient.SendAsync(
+                httpRequest,
+                HttpCompletionOption.ResponseHeadersRead,
+                ct
+            );
 
             if (!response.IsSuccessStatusCode)
             {
                 Console.WriteLine($"❌ CryptoPay API error: {response.StatusCode}");
-                return $"TEST_MODE_{userId}_{tariff.Days}_{tariff.PriceRub}";
+                return null;
             }
 
-            // Регуляркой вытаскиваем pay_url
-            var match = Regex.Match(responseContent, "\"pay_url\":\"([^\"]+)\"");
-            if (match.Success)
+            await using var responseStream = await response.Content.ReadAsStreamAsync(ct);
+            using var responseDocument = await JsonDocument.ParseAsync(
+                responseStream,
+                cancellationToken: ct
+            );
+            var root = responseDocument.RootElement;
+            if (root.ValueKind != JsonValueKind.Object)
+                return null;
+            if (
+                root.TryGetProperty("ok", out var success)
+                && success.ValueKind == JsonValueKind.True
+                && root.TryGetProperty("result", out var result)
+                && result.ValueKind == JsonValueKind.Object
+                && result.TryGetProperty("invoice_id", out var invoiceIdValue)
+                && result.TryGetProperty("pay_url", out var payUrl)
+                && result.TryGetProperty("asset", out var asset)
+                && asset.ValueKind == JsonValueKind.String
+                && asset.GetString() == "USDT"
+                && result.TryGetProperty("amount", out var invoiceAmountValue)
+                && TryGetAmount(invoiceAmountValue, out var invoiceAmount)
+                && invoiceAmount == usdtAmount
+                && TryGetInvoiceId(invoiceIdValue, out var invoiceId)
+                && payUrl.ValueKind == JsonValueKind.String
+                && Uri.TryCreate(payUrl.GetString(), UriKind.Absolute, out var paymentUri)
+                && paymentUri.Scheme == Uri.UriSchemeHttps
+            )
             {
                 Console.WriteLine($"✅ Платёж создан: {usdtAmount} USDT");
-                return match.Groups[1].Value;
+                return new CryptoPayInvoice(invoiceId, paymentUri.AbsoluteUri, usdtAmount);
             }
 
-            return "";
+            return null;
         }
-        catch (Exception ex)
+        catch (HttpRequestException ex)
         {
-            Console.WriteLine($"❌ Error: {ex.Message}");
-            return $"TEST_MODE_{userId}_{tariff.Days}_{tariff.PriceRub}";
+            Console.Error.WriteLine($"❌ CryptoPay network error: {ex.GetType().Name}");
+            return null;
+        }
+        catch (JsonException ex)
+        {
+            Console.Error.WriteLine($"❌ CryptoPay response parse error: {ex.GetType().Name}");
+            return null;
         }
     }
 
-    public async Task<bool> ProcessPaymentAsync(
-        long userId,
-        int days,
-        decimal amount,
-        CancellationToken ct = default
-    )
+    private static bool TryGetInvoiceId(JsonElement value, out string invoiceId)
     {
-        if (_isTestMode)
+        if (value.ValueKind == JsonValueKind.String)
         {
-            Console.WriteLine($"🧪 ТЕСТ: Платёж {userId} на {days}дн/{amount}₽");
-            return true;
+            invoiceId = value.GetString() ?? "";
+            return !string.IsNullOrWhiteSpace(invoiceId);
         }
-        return true;
+
+        if (value.ValueKind == JsonValueKind.Number && value.TryGetInt64(out var numericId))
+        {
+            invoiceId = numericId.ToString(CultureInfo.InvariantCulture);
+            return numericId > 0;
+        }
+
+        invoiceId = "";
+        return false;
+    }
+
+    private static bool TryGetAmount(JsonElement value, out decimal amount)
+    {
+        var amountText = value.ValueKind switch
+        {
+            JsonValueKind.String => value.GetString(),
+            JsonValueKind.Number => value.GetRawText(),
+            _ => null,
+        };
+        return decimal.TryParse(
+            amountText,
+            NumberStyles.Number,
+            CultureInfo.InvariantCulture,
+            out amount
+        );
     }
 }

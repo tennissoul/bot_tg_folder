@@ -1,4 +1,8 @@
 using KeyBot.Utils;
+using System.IO;
+using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace KeyBot.Services;
 
@@ -7,7 +11,9 @@ public class DatabaseManager
 {
     private readonly Database _database;
     private readonly string _dataPath;
-    private Timer? _saveTimer;
+    private readonly SemaphoreSlim _saveGate = new(1, 1);
+    private CancellationTokenSource? _saveCancellation;
+    private Task? _saveTask;
 
     public DatabaseManager(Database database, string dataPath)
     {
@@ -22,36 +28,91 @@ public class DatabaseManager
             _database.LoadFromJson(_dataPath);
             Console.WriteLine($"✓ БД загружена из {_dataPath}");
         }
-        catch (Exception ex)
+        catch (IOException ex)
         {
-            Console.WriteLine($"⚠️ Ошибка загрузки БД: {ex.Message}");
+            Console.Error.WriteLine($"❌ Не удалось загрузить БД: {ex.GetType().Name}");
+            throw;
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            Console.Error.WriteLine($"❌ Не удалось загрузить БД: {ex.GetType().Name}");
+            throw;
+        }
+        catch (JsonException ex)
+        {
+            Console.Error.WriteLine($"❌ Не удалось загрузить БД: {ex.GetType().Name}");
+            throw;
         }
     }
 
-    public void Save()
+    public async Task<bool> SaveAsync(CancellationToken cancellationToken = default)
     {
+        await _saveGate.WaitAsync(cancellationToken);
         try
         {
-            _database.SaveToJson(_dataPath);
+            await _database.SaveToJsonAsync(_dataPath, cancellationToken);
+            return true;
         }
-        catch (Exception ex)
+        catch (Exception ex) when (
+            ex is IOException
+                or UnauthorizedAccessException
+                or JsonException
+                or InvalidOperationException
+        )
         {
-            Console.WriteLine($"❌ Ошибка сохранения БД: {ex.Message}");
+            Console.Error.WriteLine($"❌ Ошибка сохранения БД: {ex.GetType().Name}");
+            return false;
+        }
+        finally
+        {
+            _saveGate.Release();
         }
     }
 
     /// <summary>Автосохранение каждые N мс. По умолчанию 30 секунд.</summary>
     public void StartAutoSave(int intervalMs = 30_000)
     {
-        _saveTimer?.Dispose();
-        _saveTimer = new Timer(_ => Save(), null, intervalMs, intervalMs);
+        if (intervalMs <= 0)
+            throw new ArgumentOutOfRangeException(nameof(intervalMs));
+        if (_saveTask is not null)
+            throw new InvalidOperationException("Database auto-save is already running.");
+
+        _saveCancellation = new CancellationTokenSource();
+        _saveTask = RunAutoSaveAsync(TimeSpan.FromMilliseconds(intervalMs), _saveCancellation.Token);
     }
 
-    public void Stop()
+    public async Task StopAsync()
     {
-        _saveTimer?.Dispose();
-        _saveTimer = null;
-        Save();
+        if (_saveCancellation is not null)
+        {
+            _saveCancellation.Cancel();
+            if (_saveTask is not null)
+            {
+                try
+                {
+                    await _saveTask;
+                }
+                catch (OperationCanceledException) when (_saveCancellation.IsCancellationRequested) { }
+            }
+
+            _saveCancellation.Dispose();
+            _saveCancellation = null;
+            _saveTask = null;
+        }
+
+        if (!await SaveAsync())
+            throw new InvalidOperationException("The database could not be saved during shutdown.");
         Console.WriteLine($"✓ БД сохранена в {_dataPath}");
+    }
+
+    private async Task RunAutoSaveAsync(TimeSpan interval, CancellationToken cancellationToken)
+    {
+        using var timer = new PeriodicTimer(interval);
+        try
+        {
+            while (await timer.WaitForNextTickAsync(cancellationToken))
+                await SaveAsync(cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
     }
 }

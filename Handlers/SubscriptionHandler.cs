@@ -104,9 +104,9 @@ public class SubscriptionHandler
         var lang = await _userService.GetLanguageAsync(cb.From.Id);
         int step = _cancelStep.GetValueOrDefault(cb.From.Id, 0);
 
-        if (step == 0)
+        if (step == 1)
         {
-            // Первый yes — второй уровень подтверждения
+            // Require a separate confirmation before freezing the active subscription.
             _cancelStep[cb.From.Id] = 2;
             await _bot.EditMessageText(
                 cb.Message.Chat.Id,
@@ -117,11 +117,14 @@ public class SubscriptionHandler
                 cancellationToken: ct
             );
         }
-        else
+        else if (step == 2)
         {
-            // Второй yes — замораживаем
             _cancelStep.TryRemove(cb.From.Id, out _);
             await DoFreezeAsync(cb, lang, ct);
+        }
+        else
+        {
+            await _bot.AnswerCallbackQuery(cb.Id, cancellationToken: ct);
         }
     }
 
@@ -155,7 +158,7 @@ public class SubscriptionHandler
             return;
         }
 
-        await _keyService.FreezeKeyAsync(activeKey.Key);
+        await _keyService.FreezeKeyAsync(activeKey.Key, cb.From.Id);
 
         await _bot.EditMessageText(
             cb.Message.Chat.Id,

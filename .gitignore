@@ -1,0 +1,16 @@
+.env
+.env.*
+!.env.example
+!/env.пример
+
+bin/
+obj/
+publish/
+
+data/*.json
+!data/.gitkeep
+
+*.log
+run_log.txt
+build_err.txt
+build_out.txt
